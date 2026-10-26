@@ -37,7 +37,7 @@ services:
     image: minio/minio:RELEASE.2024-08-29T01-40-52Z
     container_name: minio
     environment:
-      MINIO_DOMAIN: minio  # enables virtual-host-style access (warehouse.minio)
+      MINIO_DOMAIN: minio  
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     command: ["server", "/data", "--console-address", ":9001"]
@@ -65,6 +65,120 @@ services:
       mc mb --ignore-existing minio/warehouse;
       "
 
+  # ---------------------------------------------------------------------------
+  # Apache Polaris (alternative REST catalog, API on host port 8183)
+  # ---------------------------------------------------------------------------
+  polaris-db:
+    image: postgres:16-alpine
+    container_name: polaris-db
+    environment:
+      POSTGRES_USER: ${POLARIS_DB_USER:-polaris}
+      POSTGRES_PASSWORD: ${POLARIS_DB_PASSWORD:?set POLARIS_DB_PASSWORD in .env}
+      POSTGRES_DB: POLARIS
+    volumes:
+      - polaris-db-data:/var/lib/postgresql/data
+      - ./polaris/create-schema.sql:/docker-entrypoint-initdb.d/create-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POLARIS_DB_USER:-polaris} -d POLARIS"]
+      interval: 5s
+      timeout: 3s
+      retries: 15
+
+  # One-shot: creates the Polaris tables and the root principal/realm. Safe to re-run.
+  polaris-bootstrap:
+    image: apache/polaris-admin-tool:latest
+    container_name: polaris-bootstrap
+    depends_on:
+      polaris-db:
+        condition: service_healthy
+    environment:
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-db:5432/POLARIS
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER:-polaris}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD}
+    command:
+      - bootstrap
+      - --realm=POLARIS
+      - --credential=POLARIS,${POLARIS_CLIENT_ID:-root},${POLARIS_CLIENT_SECRET:?set POLARIS_CLIENT_SECRET in .env}
+
+  polaris:
+    image: apache/polaris:latest
+    container_name: polaris
+    depends_on:
+      polaris-bootstrap:
+        condition: service_completed_successfully
+      minio:
+        condition: service_started
+    environment:
+      POLARIS_PERSISTENCE_TYPE: relational-jdbc
+      POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
+      QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-db:5432/POLARIS
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER:-polaris}
+      QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD}
+      POLARIS_REALM_CONTEXT_REALMS: POLARIS
+      QUARKUS_OTEL_SDK_DISABLED: "true"
+      # Polaris itself reads/writes table metadata in MinIO with these credentials
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      # MinIO has no STS, so do not try to vend scoped credentials
+      polaris.features."SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION": "true"
+      polaris.readiness.ignore-severe-issues: "true"
+    ports:
+      - 8183:8181   # Polaris API / Iceberg REST (8181 is taken by the `rest` service)
+      - 8182:8182   # management: /q/health
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 15s
+
+  # One-shot: creates the `polaris_catalog` catalog backed by MinIO. Safe to re-run.
+  polaris-setup:
+    image: curlimages/curl:8.10.1
+    container_name: polaris-setup
+    depends_on:
+      polaris:
+        condition: service_healthy
+    environment:
+      CLIENT_ID: ${POLARIS_CLIENT_ID:-root}
+      CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        TOKEN=$$(curl -sf http://polaris:8181/api/catalog/v1/oauth/tokens \
+          --user "$$CLIENT_ID:$$CLIENT_SECRET" \
+          -H "Polaris-Realm: POLARIS" \
+          -d grant_type=client_credentials \
+          -d scope=PRINCIPAL_ROLE:ALL | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+        [ -n "$$TOKEN" ] || { echo "failed to obtain token"; exit 1; }
+
+        CODE=$$(curl -s -o /tmp/out -w '%{http_code}' \
+          -H "Authorization: Bearer $$TOKEN" -H "Polaris-Realm: POLARIS" \
+          -H 'Content-Type: application/json' \
+          http://polaris:8181/api/management/v1/catalogs \
+          -d '{"catalog":{"name":"polaris_catalog","type":"INTERNAL","readOnly":false,
+                "properties":{"default-base-location":"s3://warehouse/polaris"},
+                "storageConfigInfo":{"storageType":"S3",
+                  "allowedLocations":["s3://warehouse/polaris"],
+                  "endpoint":"http://minio:9000",
+                  "endpointInternal":"http://minio:9000",
+                  "pathStyleAccess":true,
+                  "stsUnavailable":true,
+                  "region":"us-east-1"}}}')
+        case "$$CODE" in 2*|409) echo "catalog ok ($$CODE)";; *) cat /tmp/out; exit 1;; esac
+
+        curl -sf -X PUT \
+          -H "Authorization: Bearer $$TOKEN" -H "Polaris-Realm: POLARIS" \
+          -H 'Content-Type: application/json' \
+          http://polaris:8181/api/management/v1/catalogs/polaris_catalog/catalog-roles/catalog_admin/grants \
+          -d '{"grant":{"type":"catalog","privilege":"CATALOG_MANAGE_CONTENT"}}'
+        echo "polaris setup done"
+
 volumes:
   minio-data:
   rest-catalog:
+  polaris-db-data:
