@@ -45,7 +45,7 @@ services:
       - minio-data:/data
     ports:
       - 9000:9000
-      - 9001:9001   # MinIO console
+      - 9001:9001   
     networks:
       default:
         aliases:
@@ -72,21 +72,21 @@ services:
     image: postgres:16-alpine
     container_name: polaris-db
     environment:
-      POSTGRES_USER: ${POLARIS_DB_USER:-polaris}
-      POSTGRES_PASSWORD: ${POLARIS_DB_PASSWORD:?set POLARIS_DB_PASSWORD in .env}
+      POSTGRES_USER: ${POLARIS_DB_USER}
+      POSTGRES_PASSWORD: ${POLARIS_DB_PASSWORD}
       POSTGRES_DB: POLARIS
     volumes:
       - polaris-db-data:/var/lib/postgresql/data
       - ./polaris/create-schema.sql:/docker-entrypoint-initdb.d/create-schema.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POLARIS_DB_USER:-polaris} -d POLARIS"]
+      test: ["CMD-SHELL", "pg_isready -U ${POLARIS_DB_USER} -d POLARIS"]
       interval: 5s
       timeout: 3s
       retries: 15
 
-  # One-shot: creates the Polaris tables and the root principal/realm. Safe to re-run.
+  
   polaris-bootstrap:
-    image: apache/polaris-admin-tool:latest
+    image: apache/polaris-admin-tool:1.8.0
     container_name: polaris-bootstrap
     depends_on:
       polaris-db:
@@ -95,15 +95,15 @@ services:
       POLARIS_PERSISTENCE_TYPE: relational-jdbc
       POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
       QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-db:5432/POLARIS
-      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER:-polaris}
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER}
       QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD}
     command:
       - bootstrap
       - --realm=POLARIS
-      - --credential=POLARIS,${POLARIS_CLIENT_ID:-root},${POLARIS_CLIENT_SECRET:?set POLARIS_CLIENT_SECRET in .env}
+      - --credential=POLARIS,${POLARIS_CLIENT_ID},${POLARIS_CLIENT_SECRET:?set POLARIS_CLIENT_SECRET in .env}
 
   polaris:
-    image: apache/polaris:latest
+    image: apache/polaris:1.8.0
     container_name: polaris
     depends_on:
       polaris-bootstrap:
@@ -114,20 +114,20 @@ services:
       POLARIS_PERSISTENCE_TYPE: relational-jdbc
       POLARIS_PERSISTENCE_RELATIONAL_JDBC_DATABASE_TYPE: postgresql
       QUARKUS_DATASOURCE_JDBC_URL: jdbc:postgresql://polaris-db:5432/POLARIS
-      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER:-polaris}
+      QUARKUS_DATASOURCE_USERNAME: ${POLARIS_DB_USER}
       QUARKUS_DATASOURCE_PASSWORD: ${POLARIS_DB_PASSWORD}
       POLARIS_REALM_CONTEXT_REALMS: POLARIS
       QUARKUS_OTEL_SDK_DISABLED: "true"
-      # Polaris itself reads/writes table metadata in MinIO with these credentials
+      
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
-      # MinIO has no STS, so do not try to vend scoped credentials
+      
       polaris.features."SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION": "true"
       polaris.readiness.ignore-severe-issues: "true"
     ports:
-      - 8183:8181   # Polaris API / Iceberg REST (8181 is taken by the `rest` service)
-      - 8182:8182   # management: /q/health
+      - 8183:8181   
+      - 8182:8182   
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8182/q/health"]
       interval: 5s
@@ -135,7 +135,7 @@ services:
       retries: 20
       start_period: 15s
 
-  # One-shot: creates the `polaris_catalog` catalog backed by MinIO. Safe to re-run.
+  
   polaris-setup:
     image: curlimages/curl:8.10.1
     container_name: polaris-setup
