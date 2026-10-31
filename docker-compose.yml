@@ -123,7 +123,6 @@ services:
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
       AWS_REGION: us-east-1
       
-      polaris.features."SKIP_CREDENTIAL_SUBSCOPING_INDIRECTION": "true"
       polaris.readiness.ignore-severe-issues: "true"
     ports:
       - 8183:8181   
