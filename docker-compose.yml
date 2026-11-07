@@ -1,10 +1,27 @@
+x-spark-image: &spark-image
+  image: digipay/spark-iceberg-kafka:3.5.5_1.8.1
+  build: ./spark
+
+# Credentials for executors: Polaris vended credentials are off (MinIO has no
+# STS), so S3FileIO on the workers reads these from the environment.
+x-spark-worker-env: &spark-worker-env
+  AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+  AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+  AWS_REGION: us-east-1
+
 services:
+  # Driver / client. Submit jobs from here with:
+  #   spark-submit --master spark://spark-master:7077 ...
+  # (it also runs its own embedded master+worker, which we don't use).
   spark-iceberg:
-    image: oci.mydigipay.info/tabulario/spark-iceberg:3.5.5_1.8.1
+    <<: *spark-image
     container_name: spark-iceberg
     depends_on:
       - rest
       - minio
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
     environment:
       AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
@@ -14,6 +31,50 @@ services:
       - 8080:8080   # Spark master UI
       - 10000:10000 # Spark Thrift server
       - 10001:10001
+
+  # ---------------------------------------------------------------------------
+  # Spark standalone cluster: 1 master + 2 workers (UI: master 8090,
+  # workers 8091/8092). Total capacity: 4 cores, 2 GB executor memory.
+  # Each container is capped at 2 GB (mem_limit).
+  # ---------------------------------------------------------------------------
+  spark-master:
+    <<: *spark-image
+    container_name: spark-master
+    mem_limit: 2g
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master",
+                 "--host", "spark-master", "--port", "7077", "--webui-port", "8080"]
+    ports:
+      - 8090:8080   # master UI
+
+  spark-worker-1:
+    <<: *spark-image
+    container_name: spark-worker-1
+    mem_limit: 2g
+    depends_on:
+      - spark-master
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+                 "--webui-port", "8081", "spark://spark-master:7077"]
+    environment:
+      <<: *spark-worker-env
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 1g
+    ports:
+      - 8091:8081
+
+  spark-worker-2:
+    <<: *spark-image
+    container_name: spark-worker-2
+    mem_limit: 2g
+    depends_on:
+      - spark-master
+    entrypoint: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker",
+                 "--webui-port", "8081", "spark://spark-master:7077"]
+    environment:
+      <<: *spark-worker-env
+      SPARK_WORKER_CORES: "2"
+      SPARK_WORKER_MEMORY: 1g
+    ports:
+      - 8092:8081
 
   rest:
     image: oci.mydigipay.info/apache/iceberg-rest-fixture:1.10.1

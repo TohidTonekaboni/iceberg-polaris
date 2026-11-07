@@ -17,7 +17,8 @@ Everything runs from [docker-compose.yml](docker-compose.yml):
 | `kafka-ui` | Browse topics and messages | http://localhost:8085 |
 | `polaris` (+ `polaris-db`) | Iceberg REST catalog | `8183` |
 | `minio` | S3-compatible warehouse storage | `9000`, console `9001` |
-| `spark-iceberg` | Spark/Jupyter for querying tables | `8888` |
+| `spark-master`, `spark-worker-1`, `spark-worker-2` | Spark standalone cluster (see below) | UIs `8090`, `8091`, `8092` |
+| `spark-iceberg` | Spark driver/client, Jupyter and `spark-submit` | `8888` |
 
 Setup details live in [commands.md](commands.md) (health checks) and [iceberg-polaris-test.md](iceberg-polaris-test.md) (Iceberg + Polaris end-to-end test).
 
@@ -28,9 +29,49 @@ docker run --rm apache/kafka:3.9.2 /opt/kafka/bin/kafka-storage.sh random-uuid
 ```
 
 ```sh
-docker compose up -d
-docker compose ps   # kafka-1 and kafka-2 should be healthy
+docker compose up -d --build   # first run builds the Spark image (needs internet for Maven Central)
+docker compose ps              # kafka-1 and kafka-2 should be healthy
 ```
+
+## Spark cluster
+
+A standalone cluster for phase 2 and for practicing Spark operations: 1 master and 2 workers, each worker with 2 cores and 1 GB (4 cores and 2 GB in total).
+
+| Container | Role | UI |
+|-----------|------|----|
+| `spark-master` | Master, `spark://spark-master:7077` | http://localhost:8090 |
+| `spark-worker-1` | Worker | http://localhost:8091 |
+| `spark-worker-2` | Worker | http://localhost:8092 |
+| `spark-iceberg` | Driver (client mode): run `spark-submit` here | Jupyter http://localhost:8888 |
+
+All four use one image built from [spark/Dockerfile](spark/Dockerfile). It is the `spark-iceberg` base image (Spark 3.5.5, Iceberg 1.8.1) plus the Kafka connector jars, so versions are identical on every node.
+
+Submit a job from the driver container:
+
+```sh
+docker compose exec spark-iceberg spark-submit \
+  --master spark://spark-master:7077 \
+  --conf spark.driver.host=spark-iceberg \
+  --conf spark.driver.bindAddress=0.0.0.0 \
+  --conf spark.executor.memory=768m \
+  --conf spark.executor.cores=2 --conf spark.cores.max=4 \
+  /path/to/job.py
+```
+
+Things to know:
+- **Client mode only.** Standalone mode doesn't support cluster deploy mode for PySpark, so the driver runs in `spark-iceberg`. Executors connect back to it, which is why `spark.driver.host` is required.
+- **Kafka from inside the network:** `kafka-1:9092,kafka-2:9092`, not `localhost:9094`.
+- **Polaris catalog config:** the catalog settings are given by the job, as in [iceberg-polaris-test.md](iceberg-polaris-test.md). Vended credentials are off, so executors write to MinIO with the `AWS_*` variables set on the workers in `docker-compose.yml`.
+- **Memory:** the master and each worker container are capped at 2 GB (`mem_limit` in `docker-compose.yml`). Workers offer 1 GB to executors (`SPARK_WORKER_MEMORY`), leaving headroom for the JVM and Python overhead. Docker Desktop has about 8 GB here. Keep executor memory at or below the worker memory (1 GB). Raise `SPARK_WORKER_MEMORY` only if Docker has room.
+- `spark-iceberg` also runs its own embedded master and worker. They are unused.
+
+Check the cluster:
+
+```sh
+curl -s http://localhost:8090/json/ | python3 -c "import json,sys; d=json.load(sys.stdin); print(d['status'], [(w['cores'], w['memory'], w['state']) for w in d['workers']])"
+```
+
+Expect `ALIVE` with two workers, each `2 1024 ALIVE`. A job's progress appears in the master UI while it runs.
 
 ## Phase 1: simulate ingestion into Kafka
 
