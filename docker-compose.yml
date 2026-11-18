@@ -32,6 +32,10 @@ services:
       - 10000:10000 # Spark Thrift server
       - 10001:10001
 
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+
+
   # ---------------------------------------------------------------------------
   # Spark standalone cluster: 1 master + 2 workers (UI: master 8090,
   # workers 8091/8092). Total capacity: 4 cores, 2 GB executor memory.
