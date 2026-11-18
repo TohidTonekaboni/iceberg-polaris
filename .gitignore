@@ -1,3 +1,3 @@
-.venv/
+/**/.venv/
 spark/jars/
 /**/__pycache__
