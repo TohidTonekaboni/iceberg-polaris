@@ -31,6 +31,7 @@ services:
       - 8080:8080   # Spark master UI
       - 10000:10000 # Spark Thrift server
       - 10001:10001
+      - 4041:4041   # streaming driver UI (4040 is taken by the embedded Spark in this container)
 
     volumes:
       - ./spark/jobs:/opt/jobs:ro
