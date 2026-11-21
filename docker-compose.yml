@@ -106,6 +106,27 @@ services:
       - 4040:4040   # driver UI
     entrypoint: ["/bin/bash", "/opt/jobs/submit_streaming.sh"]
 
+  # Periodic Iceberg table maintenance (compaction, manifests, snapshot expiry,
+  # orphan cleanup). Interval is set with MAINTENANCE_INTERVAL_SECONDS (default 1h).
+  spark-maintenance:
+    <<: *spark-image
+    container_name: spark-maintenance
+    restart: unless-stopped
+    mem_limit: 1g
+    depends_on:
+      - spark-master
+      - polaris
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+      MAINTENANCE_INTERVAL_SECONDS: ${MAINTENANCE_INTERVAL_SECONDS:-3600}
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+    entrypoint: ["/bin/bash", "/opt/jobs/maintenance.sh"]
+
   rest:
     image: oci.mydigipay.info/apache/iceberg-rest-fixture:1.10.1
     container_name: iceberg-rest
