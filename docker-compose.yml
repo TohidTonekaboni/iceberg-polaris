@@ -81,6 +81,31 @@ services:
     ports:
       - 8092:8081
 
+  # Long-lived streaming driver: Kafka -> Iceberg (Polaris). Restarts
+  # automatically and resumes from its checkpoint. Driver UI: http://localhost:4040
+  spark-streaming:
+    <<: *spark-image
+    container_name: spark-streaming
+    restart: unless-stopped
+    depends_on:
+      - spark-master
+      - spark-worker-1
+      - spark-worker-2
+      - polaris
+      - kafka-1
+      - kafka-2
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_REGION: us-east-1
+      POLARIS_CLIENT_ID: ${POLARIS_CLIENT_ID}
+      POLARIS_CLIENT_SECRET: ${POLARIS_CLIENT_SECRET}
+    volumes:
+      - ./spark/jobs:/opt/jobs:ro
+    ports:
+      - 4040:4040   # driver UI
+    entrypoint: ["/bin/bash", "/opt/jobs/submit_streaming.sh"]
+
   rest:
     image: oci.mydigipay.info/apache/iceberg-rest-fixture:1.10.1
     container_name: iceberg-rest
